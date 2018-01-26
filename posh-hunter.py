@@ -58,6 +58,7 @@ class PoshC2Payload:
 
     c2 = PoshC2Server()
     c2.key = self.encryptionkey
+    c2.useragent = self.headers['User-Agent']
     return c2
 
   # Recursively attempt to extract and decode base64
@@ -119,7 +120,6 @@ class PoshC2Server:
   pid = None
   username = None
   domain = None
-  cookies = None
   debug = False
   sleeptime = 5
 
@@ -133,29 +133,32 @@ class PoshC2Server:
       self.hostheader = hostheader
 
   def do_request( self, url, data=None ):
-    
+   
+
+    self.debug = False
+
     # def do_request( self, path, method='GET', data=None, files=None, returnformat='json', savefile=None ):
     headers = {
       'Host': self.hostheader,
       'Referer': self.referer,
       'User-Agent': self.useragent,
       'Cookie': self.cookie
+    
     }
-    if len(self.session.cookies) > 0:
-      cookies = requests.utils.dict_from_cookiejar(self.session.cookies)
-      cookies['SessionID'] = self.cookie
-      print 'Including cookies'
-      print self.cookie
+    # print headers
 
-    try:
-      if data:
-        response = self.session.post(url, data=data, headers=headers, verify=False ) # , files=files, stream=stream )
-      else:
-        response = self.session.get(url, headers=headers, verify=False )
-    except:
-      e = sys.exc_info()[1]
-      print 'Request failed: ' + str( e ), 'fail' 
-      return False
+    import warnings
+    with warnings.catch_warnings():
+      warnings.simplefilter("ignore")
+      try:
+        if data:
+          response = self.session.post(url, data=data, headers=headers, verify=False ) # , files=files, stream=stream )
+        else:
+          response = self.session.get(url, headers=headers, verify=False )
+      except:
+        e = sys.exc_info()[1]
+        print 'Request failed: ' + str( e ), 'fail' 
+        return False
 
     if self.debug: 
       print response
@@ -169,6 +172,7 @@ class PoshC2Server:
 
   def get_encryption( self, iv='0123456789ABCDEF' ):
     from Crypto.Cipher import AES
+    # print 'IV: ', iv
     aes = AES.new( base64.b64decode(self.key), AES.MODE_CBC, iv )
     return aes
 
@@ -207,6 +211,7 @@ class PoshC2Server:
   # Decrypt a string from base64 encoding 
   def decrypt( self, data, gzip=False ):
     # iv is first 16 bytes of cipher
+    print data
     iv = data[0:16]
     # data = data[16:]
     # print 'IV length: ' + str(len(iv))
@@ -239,7 +244,7 @@ class PoshC2Server:
       c += self.host
     print c
     self.cookie = 'SessionId=' + self.encrypt( c )
-    print self.cookie
+    # print self.cookie
 
   # Get the second stage
   def secondstage( self, url, interact=False ):
@@ -252,7 +257,7 @@ class PoshC2Server:
     data = self.do_request( url )
     data = self.decrypt( data )
 
-    # print data
+    print data
 
     # Get encryption key, URL
     m = re.search( r'\$key *= *"([^"]+)"', data )
@@ -316,7 +321,7 @@ class PoshC2Server:
       print 'Prenumbers: ' + prenumbers
       print 'Imgdata: ' + uploadbytes
       response = self.do_request( self.commsurl, uploadbytes )
-      print response
+      # print response
       if len(response.strip()) > 0:
         print self.decrypt( response )
     return False  
@@ -332,15 +337,22 @@ class PoshC2Server:
     print 'Listening to server on comms URL: ' + url
     fmt = '%Y-%m-%d %H:%M:%S'
     while True:
+      self.setcookie( '' )
       data = self.do_request( url )
-      cmd = self.decrypt( data )
-      out = ''
-      if 'fvdsghfdsyyh' in cmd:
+      if len( data.strip() ) > 0:
+        try:
+          cmd = self.decrypt( data )
+        except:
+          print 'Decrypting response failed: ' + data
+        out = ''
+        if 'fvdsghfdsyyh' in cmd:
+          out = 'No command...'
+        elif '!d-3dion@LD!-d' in cmd:
+          out = '\n'.join(cmd.split('!d-3dion@LD!-d'))
+        else: 
+          out = cmd
+      else:
         out = 'No command...'
-      elif '!d-3dion@LD!-d' in cmd:
-        out = '\n'.join(cmd.split('!d-3dion@LD!-d'))
-      else: 
-        out = cmd
 
       print datetime.datetime.now().strftime(fmt) + ': ' + out
       time.sleep( self.sleeptime )
